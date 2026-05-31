@@ -1,0 +1,54 @@
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: PodGroup
+metadata:
+  name: llama-serving
+  namespace: default
+spec:
+  minMember: 1
+  queue: default
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llama-serving-0
+  namespace: default
+  annotations:
+    scheduling.k8s.io/group-name: llama-serving
+    # Pods with the same instance value belong to one logical serving instance.
+    model-locality.volcano.sh/instance: llama-serving-a
+    # same-nvlink means every pod of this instance must stay in one NVLink domain.
+    # Change to same-node if you want every pod on exactly the same physical node.
+    model-locality.volcano.sh/topology: same-nvlink
+    # This drives the cache-locality score.
+    model-locality.volcano.sh/model: llama-7b
+spec:
+  schedulerName: volcano
+  restartPolicy: Never
+  containers:
+  - name: server
+    image: nginx:1.25
+    resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llama-serving-1
+  namespace: default
+  annotations:
+    scheduling.k8s.io/group-name: llama-serving
+    model-locality.volcano.sh/instance: llama-serving-a
+    model-locality.volcano.sh/topology: same-nvlink
+    model-locality.volcano.sh/model: llama-7b
+spec:
+  schedulerName: volcano
+  restartPolicy: Never
+  containers:
+  - name: server
+    image: nginx:1.25
+    resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
