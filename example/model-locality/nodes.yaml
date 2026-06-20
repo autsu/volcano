@@ -1,0 +1,28 @@
+# This file is a readable simulation. In a real cluster, patch existing Nodes
+# instead of creating Node objects by hand.
+apiVersion: v1
+kind: Node
+metadata:
+  name: node-a
+  labels:
+    model-locality.volcano.sh/nvlink-domain: nvlink-a
+  annotations:
+    model-locality.volcano.sh/cached-models: llama-7b,qwen-7b
+---
+apiVersion: v1
+kind: Node
+metadata:
+  name: node-b
+  labels:
+    model-locality.volcano.sh/nvlink-domain: nvlink-a
+  annotations:
+    model-locality.volcano.sh/cached-models: qwen-7b
+---
+apiVersion: v1
+kind: Node
+metadata:
+  name: node-c
+  labels:
+    model-locality.volcano.sh/nvlink-domain: nvlink-b
+  annotations:
+    model-locality.volcano.sh/cached-models: llama-70b
