@@ -27,7 +27,8 @@ Volcano 作为批处理调度器，需要在节点打分方面与 K8s 默认调�
 
 ```mermaid
 flowchart TD
-    K8S["K8s 原生 ScorePlugin<br/>noderesources, nodeaffinity,<br/>interpodaffinity, ..."] -->|"适配"| NO["NodeOrder 适配层<br/>• 转换 Volcano NodeInfo → K8s Info<br/>• 管理 8 种权重配置<br/>• 分两条路径调用不同插件"]
+    K8S["K8s 原生 ScorePlugin<br/>noderesources, nodeaffinity,<br/>interpodaffinity, ..."]
+    K8S -->|"适配"| NO["NodeOrder 适配层<br/>• 转换 Volcano NodeInfo → K8s Info<br/>• 管理 8 种权重配置<br/>• 分两条路径调用不同插件"]
     NO -->|"注册为"| V1["Volcano Session<br/>AddNodeOrderFn<br/>AddBatchNodeOrderFn"]
 ```
 
@@ -61,19 +62,15 @@ flowchart TD
 ### 2.1 策略语义对照
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph BIN["binpack (MostAllocated) 紧凑装箱"]
-        direction TB
-        BA["节点A ████████░░ 80%"] -->|"高分"| BAR["→ Pod 调度到 A"]
+        BA["节点A ████████░░ 80%"] -->|"高分 → 调度到 A"| BAR["减少碎片，提升装箱率"]
         BB["节点B ███░░░░░░░ 30%"] -->|"低分"| BBR[" "]
     end
     subgraph NO["nodeorder (LeastAllocated) 均匀分散"]
-        direction TB
         NA["节点A ████████░░ 80%"] -->|"低分"| NAR[" "]
-        NB["节点B ███░░░░░░░ 30%"] -->|"高分"| NBR["→ Pod 调度到 B"]
+        NB["节点B ███░░░░░░░ 30%"] -->|"高分 → 调度到 B"| NBR["负载均衡，降低热点风险"]
     end
-    BIN -->|"减少碎片"| RESULT1["提升装箱率"]
-    NO -->|"负载均衡"| RESULT2["降低热点风险"]
 ```
 
 ---
@@ -349,19 +346,17 @@ score = (1 - |cpuUtil - memUtil|) × weight
 ### 5.1 设计原因
 
 ```mermaid
-flowchart LR
-    subgraph SINGLE["NodeOrderFn 逐节点"]
-        S1["调用频率: 每个 task-node pair"]
-        S2["NodeResourcesFit"]
-        S3["BalancedAllocation"]
-        S4["NodeAffinity"]
-        S5["ImageLocality"]
+flowchart TD
+    subgraph SINGLE["NodeOrderFn 逐节点 — 每个 task-node pair 调用一次"]
+        S1["NodeResourcesFit"]
+        S2["BalancedAllocation"]
+        S3["NodeAffinity"]
+        S4["ImageLocality"]
     end
-    subgraph BATCH["BatchNodeOrderFn 批量"]
-        B1["调用频率: 每个 task 一次"]
-        B2["InterPodAffinity"]
-        B3["TaintToleration"]
-        B4["PodTopologySpread"]
+    subgraph BATCH["BatchNodeOrderFn 批量 — 每个 task 调用一次"]
+        B1["InterPodAffinity"]
+        B2["TaintToleration"]
+        B3["PodTopologySpread"]
     end
 ```
 

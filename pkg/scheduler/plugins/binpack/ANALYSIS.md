@@ -296,13 +296,14 @@ flowchart TD
 ### 6.1 Volcano 调度周期
 
 ```mermaid
-flowchart LR
-    SNAPSHOT["Snapshot<br/>快照集群状态"] --> OSO["OnSessionOpen<br/>插件初始化"]
-    OSO --> ACTIONS["Actions<br/>执行调度"]
-    ACTIONS --> ALLOCATE["allocate action<br/>for each task:"]
-    ALLOCATE --> P1["1. PredicateFn<br/>预选: 过滤节点<br/>binpack 不参与"]
-    ALLOCATE --> P2["2. NodeOrderFn<br/>打分: binpack 参与!<br/>Best-Fit 紧凑装箱"]
-    ALLOCATE --> P3["3. BestNodeFn<br/>选择最佳节点"]
+flowchart TD
+    SNAPSHOT["Snapshot 快照集群状态"]
+    SNAPSHOT --> OSO["OnSessionOpen 插件初始化"]
+    OSO --> ACTIONS["Actions 执行调度"]
+    ACTIONS --> ALLOCATE["allocate action for each task"]
+    ALLOCATE --> P1["1. PredicateFn 预选: 过滤节点<br/>binpack 不参与"]
+    ALLOCATE --> P2["2. NodeOrderFn 打分: binpack 参与!<br/>Best-Fit 紧凑装箱"]
+    ALLOCATE --> P3["3. BestNodeFn 选择最佳节点"]
 ```
 
 ### 6.2 NodeOrderFn 的调用方式

@@ -758,18 +758,19 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TD
-    START([输入: preemptor, preemptees]) --> INIT[jobOccupiedMap = {}]
+    START([输入: preemptor, preemptees])
+    START --> INIT["jobOccupiedMap = 空 map"]
     INIT --> LOOP{遍历 preemptees}
 
     LOOP -->|next| GETJOB[获取 preemptee 的 Job]
-    GETJOB --> CACHED{job 已在<br/>jobOccupiedMap?}
+    GETJOB --> CACHED{该 job 已缓存?}
 
-    CACHED -->|no| QUERY[jobOccupiedMap[job] =<br/>job.ReadyTaskNum]
-    CACHED -->|yes| CHECK
-    QUERY --> CHECK{jobOccupiedMap[job]<br/> > job.MinAvailable?}
+    CACHED -->|no| QUERY["缓存 job 的 ReadyTaskNum<br/>jobOccupiedMap[job.UID] = job.ReadyTaskNum"]
+    CACHED -->|yes| CHECK{已缓存数量 大于 MinAvailable?}
+    QUERY --> CHECK
 
-    CHECK -->|yes| ALLOW[victims.append preemptee<br/>jobOccupiedMap[job]--]
-    CHECK -->|no| SKIP[拒绝抢占<br/>保护 Gang 语义]
+    CHECK -->|yes| ALLOW[加入 victims<br/>已缓存数量 - 1]
+    CHECK -->|no| SKIP[拒绝: 保护 Gang 语义]
 
     ALLOW --> LOOP
     SKIP --> LOOP
@@ -792,13 +793,13 @@ Job C: MinAvailable=3, ReadyTaskNum=4
 ### 6.3 为什么 Gang 保护至关重要
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph WITHOUT[没有 Gang 保护]
-        W1[Job A<br/>3 Task Running<br/>MinAvailable=3] -->|抢占者抢走 1 个| W2[Job A<br/>只剩 2 Task<br/>❌ Gang 语义被破坏!<br/>训练作业全部卡住]
+        W1[Job A: 3 Task Running, MinAvailable=3] -->|"抢占者抢走 1 个"| W2["Job A: 只剩 2 Task<br/>❌ Gang 语义被破坏!<br/>训练作业全部卡住"]
     end
 
     subgraph WITH[有 Gang 保护]
-        V1[Job A<br/>3 Task Running<br/>MinAvailable=3] -->|ReadyTaskNum ≤ MinAvailable| V2[拒绝抢占<br/>✅ Gang 语义得到保护]
+        V1[Job A: 3 Task Running, MinAvailable=3] -->|"ReadyTaskNum ≤ MinAvailable"| V2["拒绝抢占<br/>✅ Gang 语义得到保护"]
     end
 ```
 

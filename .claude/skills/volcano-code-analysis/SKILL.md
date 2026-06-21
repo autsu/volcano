@@ -7,11 +7,17 @@ description: Analyze Volcano scheduler source code — read code, add Chinese co
 
 当用户要求分析 Volcano 项目中的某个插件、Action 或调度机制时，按此规范执行。
 
+## 核心原则
+
+- **一切结论必须有源码依据**：每条分析结论都要引用具体源码文件和行号作为证据（markdown 链接格式：`[file.go:42](path/to/file.go#L42)`），不得凭经验推测或编造
+- 如果某个说法在源码中找不到直接支撑，标注为"推测"或"待验证"
+
 ## 分析流程
 
 1. **先完整阅读目标文件**，再读依赖的接口/类型定义
 2. **不只读插件代码**，还要追踪 Action 中如何调用这些函数——从调用方理解被调用方
 3. **从源码层面验证**，不盲从用户猜测，每条结论都要有源码引用支撑
+4. **交叉验证接口签名**：检查 `session_plugins.go` 中的 `AddXxxFn` 方法和对应 Action 中的调用方式，确认调用链完整
 
 ## 产出内容
 
@@ -36,6 +42,8 @@ description: Analyze Volcano scheduler source code — read code, add Chinese co
 
 **文档规范**：
 - **所有流程描述必须用 Mermaid 图**，禁止 ASCII art（`┌─┐` 等）
+- **Mermaid 图用 TD（上到下）方向**，不用 LR（左到右）——扁平窄幅，方便渲染和阅读
+- **图的宽度控制在合理范围**：多层级时纵向展开而非横向并排，避免 subgraph 并排过多
 - **关键概念必须举具体例子**：假设场景 → 代码如何处理 → 结果
 - **状态/决策用表格对照**
 - **源码引用用 markdown 链接**：`[file.go:42](path/to/file.go#L42)`
