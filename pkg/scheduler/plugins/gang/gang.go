@@ -177,6 +177,13 @@ func (gp *gangPlugin) OnSessionOpen(ssn *framework.Session) {
 	//     → 可以抢最多 2 个 Task（5-3=2 个超额）
 	//   Job B: MinAvailable=3, 当前有 3 个 Ready Task
 	//     → 一个都不能抢，否则 Gang 语义被破坏
+	//
+	// MinAvailable 动态上调的特殊场景：
+	//   当用户修改 PodGroup.Spec.MinMember 上调 MinAvailable（如 4→6）：
+	//     - 已调度的 Task 不会因此被驱逐：PreemptableFn 保护 ReadyTaskNum ≤ MinAvailable 的 Job
+	//     - 上调后 ReadyTaskNum(5) ≤ MinAvailable(6) → 5 个 Task 全部受保护
+	//     - Job 进入 Starving 状态，调度器尝试为剩余 Task 抢占其他 Job 的资源
+	//     - 不存在主动"撤销 Bind"的回滚机制，已 Bound 的 Pod 由 Kubelet 管理
 	preemptableFn := func(preemptor *api.TaskInfo, preemptees []*api.TaskInfo) ([]*api.TaskInfo, int) {
 		var victims []*api.TaskInfo
 		// jobOccupiedMap 缓存每个 Job 的当前 Ready Task 数，避免重复计算
@@ -368,6 +375,9 @@ func (gp *gangPlugin) OnSessionOpen(ssn *framework.Session) {
 //  2. 对未就绪的 Job，计算"差多少 Task 才能满足 MinAvailable"
 //  3. 更新 PodGroup Condition（Unschedulable / Scheduled）
 //  4. 上报调度指标（unScheduleJobCount, unscheduleTaskCount）
+//
+// 注意：当 MinAvailable 被动态上调后，之前已就绪的 Job 可能变为未就绪，
+// 此处会正确反映新的状态（Unschedulable），但已 Bound 的 Pod 不会被驱逐。
 //
 // 状态转换逻辑：
 //

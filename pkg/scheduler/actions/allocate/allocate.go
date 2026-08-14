@@ -14,6 +14,24 @@
  limitations under the License.
 */
 
+// Package allocate 实现 Volcano 调度器的核心分配逻辑。
+//
+// allocate action 是 Volcano 调度流程中最核心的一环，负责为 Job 的 Pending Task
+// 分配节点资源。它实现了完整的调度流水线：
+//
+//	Queue 排序 → Job 排序 → Task 排序 → Predicate 过滤 → NodeOrder 打分 → 分配/Bind
+//
+// 两条分配路径：
+//   - 正常路径（allocateResourcesForTasks）：逐 Task → 逐节点 → 分配
+//   - 拓扑/SubJob 路径（allocateForJob）：HyperNode 梯度搜索 + dry-run 多方案择优
+//
+// 与 Gang 协作：只有在 JobReady（凑够 MinAvailable 个 Allocated Task）时才 Commit Bind，
+// Pipelined 状态只保存方案不 Commit，保证 Gang 的 All-or-Nothing 语义。
+//
+// 关键设计：
+//   - 两级梯度节点选择：Idle 优先（Allocated），FutureIdle 降级（Pipelined）
+//   - 事务性分配：stmt.Allocate/Pipeline 记录操作，Commit 才真正生效
+//   - Dry-run 模式：HyperNode 试分配后 Discard，选最优方案 Recover
 package allocate
 
 import (
@@ -38,6 +56,18 @@ import (
 	commonutil "volcano.sh/volcano/pkg/util"
 )
 
+// allocateContext 是单次调度周期的上下文，承载所有需要调度的 Queue / Job / Task。
+//
+// 三层优先级队列结构：
+//
+//	queues              → QueueOrderFn 排序 → 决定先处理哪个 Queue
+//	jobsByQueue[queue]  → JobOrderFn 排序   → 决定 Queue 内先处理哪个 Job
+//	tasksNoHardTopology → TaskOrderFn 排序  → 决定 Job 内先分配哪个 Task
+//
+// 为什么分 queues 和 jobsByQueue 两层？
+//   - Queue 之间存在资源竞争，QueueOrderFn（如 proportion）决定谁先拿资源
+//   - 同一 Queue 内的 Job 之间也需要排序，JobOrderFn（如 gang 的未就绪优先）决定顺序
+//   - 每次只 Pop 一个 Queue 的一个 Job，处理完立刻 Push 回 Queue，重新排队
 type allocateContext struct {
 	queues              *util.PriorityQueue                 // queue of *api.QueueInfo
 	jobsByQueue         map[api.QueueID]*util.PriorityQueue // queue of *api.JobInfo
@@ -94,6 +124,14 @@ func (w *SubJobWorksheet) Clone() *SubJobWorksheet {
 	}
 }
 
+// Action 是 allocate action 的结构体，实现 framework.Action 接口。
+//
+// 生命周期：New() → Initialize() → Execute() → UnInitialize()
+// 每次调度周期创建一个新实例，Execute 只调用一次。
+//
+// recorder 用于记录 Job/SubJob 在哪个 HyperNode 上成功分配，
+// 在 Commit 后调用 UpdateDecisionToJob 更新 Job.AllocatedHyperNode，
+// 在 RecoverSubJobStatus 中回滚 SubJob 状态。
 type Action struct {
 	session *framework.Session
 	// configured flag for error cache
@@ -119,6 +157,15 @@ func (alloc *Action) parseArguments(ssn *framework.Session) {
 	arguments.GetBool(&alloc.enablePredicateErrorCache, conf.EnablePredicateErrCacheKey)
 }
 
+// Execute 是 allocate action 的入口。
+// 遵循 Volcano 调度流水线五步法：
+//   1. QueueOrderFn 挑一个 Queue
+//   2. JobOrderFn 从 Queue 里挑一个 Job
+//   3. TaskOrderFn 从 Job 里挑一个 Task
+//   4. PredicateFn 过滤 Task 不能放的节点
+//   5. NodeOrderFn 打分选出最佳节点
+//
+// 实际执行分三步：解析参数 → 构建上下文 → 主分配循环
 func (alloc *Action) Execute(ssn *framework.Session) {
 	klog.V(5).Infof("Enter Allocate ...")
 	defer klog.V(5).Infof("Leaving Allocate ...")
@@ -280,6 +327,21 @@ func (alloc *Action) organizeJobWorksheet(job *api.JobInfo) *JobWorksheet {
 	return jWorksheet
 }
 
+// allocateResources 是 allocate action 的主分配循环。
+//
+// 循环逻辑：
+//  1. 从 PriorityQueue 中 Pop 一个 Queue
+//  2. 检查 Queue 是否 Overused（超配额）
+//  3. 从 Queue 的 Job 队列中 Pop 一个 Job
+//  4. 根据 Job 类型走不同分配路径
+//  5. 只有 JobReady 才 Commit（Gang 语义：凑不够 MinAvailable 不 Bind）
+//  6. Queue 推回，重新排队
+//
+// 关键设计：
+//   - 每次迭代只处理一个 Job，Queue 立刻推回
+//   - 如果 Job 还有剩余 Pending Task → Push 回 Job 队列，下一轮继续
+//   - OuterLoop 处理完所有 Queue 才退出（queues.Empty()）
+//   - JobReady 时才 Commit，Pipelined 状态不 Commit（stmt 自动丢弃）
 func (alloc *Action) allocateResources(actx *allocateContext) {
 	ssn := alloc.session
 
@@ -696,6 +758,31 @@ func invalidateSubJobNomination(subJob *api.SubJobInfo, subJobWorksheet *SubJobW
 	}
 }
 
+// allocateResourcesForTasks 是正常分配路径（无硬拓扑/SubJob 策略）的核心函数。
+//
+// 参数：
+//   - subJob: 当前要调度的 SubJob
+//   - tasks: PriorityQueue of *api.TaskInfo，按 TaskOrderFn 排序
+//   - hyperNode: 当前搜索的 HyperNode 名
+//
+// 对一个 SubJob 的所有 Pending Task 逐 Task 分配节点：
+//  1. Allocatable 检查 → 过滤 Gate task → 检查 FitError 缓存
+//  2. PrePredicateFn → 过滤（失败则 break，终止整个 SubJob）
+//  3. NominatedNodeName 快速路径 → 普通 Predicate 全节点过滤
+//  4. Predicate 失败 → NeedContinueAllocating 决定 break/continue
+//  5. prioritizeNodes → 两级梯度打分 → 选出最佳节点
+//  6. allocateResourcesForTask → Idle 够则 Allocate，否则 FutureIdle 够则 Pipeline
+//  7. SubJobReady 检查 → 凑够 MinAvailable 就停
+//
+// 返回值：
+//   - SubJobReady → 返回 stmt（可 Commit）
+//   - SubJobPipelined → 返回 stmt（不 Commit）
+//   - 都不满足 → Discard → 返回 nil
+//
+// 关键行为：
+//   - PrePredicateFn 失败 → break（终止 SubJob，不是 continue）
+//   - PredicateFn 失败 → NeedContinueAllocating() 决定是否继续
+//   - 每分配一个 Task 检查一次 SubJobReady，够了就停
 func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *util.PriorityQueue, hyperNode string) *framework.Statement {
 	ssn := alloc.session
 
@@ -721,6 +808,7 @@ func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *ut
 
 	for !tasks.Empty() {
 		task := tasks.Pop().(*api.TaskInfo)
+		// 判断 queue 是否有足够的资源来分配 task，如果没有就跳过这个 task，继续下一个 task 的分配。
 		if !ssn.Allocatable(queue, task) {
 			klog.V(3).Infof("Queue <%s> is overused when considering task <%s>, ignore it.", queue.Name, task.Name)
 			continue
@@ -756,6 +844,9 @@ func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *ut
 
 		klog.V(3).Infof("There are <%d> nodes for Job <%v/%v>", len(nodes), job.Namespace, job.Name)
 
+		// PrePredicateFn 是 Predicate 的预处理步骤。
+		// 如果 PrePredicate 失败，说明当前调度上下文有问题，整个 SubJob 应该停止分配。
+		// 注意这里是 break 不是 continue —— PrePredicate 失败意味着此 SubJob 无法继续。
 		if err := ssn.PrePredicateFn(task); err != nil {
 			klog.V(3).Infof("PrePredicate for task %s/%s failed for: %v", task.Namespace, task.Name, err)
 			fitErrors := api.NewFitErrors()
@@ -810,6 +901,7 @@ func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *ut
 			task.JobAllocatedHyperNode = allocatedHyperNode
 		}
 
+		// 两级梯度打分：Idle 优先（Allocated），FutureIdle 降级（Pipelined）
 		bestNode, _ := alloc.prioritizeNodes(ssn, task, predicateNodes)
 		if bestNode == nil {
 			continue
@@ -824,6 +916,8 @@ func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *ut
 			allocatedHyperNode = getNewAllocatedHyperNode(ssn, bestNode.Name, allocatedHyperNode)
 		}
 
+		// 每分配一个 Task 就检查 SubJobReady。
+		// 一旦满足 MinAvailable，不再继续分配多余 Task（gang 语义下分配多余 Task 无意义）。
 		if ssn.SubJobReady(job, subJob) {
 			break
 		}
@@ -856,7 +950,25 @@ func getNewAllocatedHyperNode(ssn *framework.Session, bestNode string, jobAlloca
 	return jobAllocatedHyperNode
 }
 
-// prioritizeNodes selects the highest score node.
+// prioritizeNodes 从 Predicate 通过的节点中选出最佳节点。
+//
+// 两级梯度机制：
+//
+//	梯度 1: Idle ≥ Request       → 当前空闲足够 → Allocate（直接分配）
+//	梯度 2: FutureIdle ≥ Request  → Idle+Releasing 够 → Pipeline（等释放）
+//
+// 四个候选列表（按优先级从高到低）：
+//  1. idleCandidateNodes              → Idle 够 + 本 Shard
+//  2. idleCandidateNodesInOtherShards → Idle 够 + 其他 Shard
+//  3. futureIdleCandidateNodes        → FutureIdle 够 + 本 Shard
+//  4. futureIdleCandidateNodesInOtherShards → FutureIdle 够 + 其他 Shard
+//
+// 优先使用梯度 1，只有当梯度 1 一个节点都找不到时，才降级到梯度 2。
+// 这对应了 allocateResourcesForTask 的两种分配方式：
+//   - Idle 够 → Allocate  → Status = Allocated
+//   - FutureIdle 够 → Pipeline → Status = Pipelined
+//
+// 如果候选节点 >1，调用 NodeOrderFn（binpack/nodeorder 等）打分，BestNodeFn 选最优。
 func (alloc *Action) prioritizeNodes(ssn *framework.Session, task *api.TaskInfo, predicateNodes []*api.NodeInfo) (*api.NodeInfo, float64) {
 	// Candidate nodes are divided into two gradients:
 	// - the first gradient node: a list of free nodes that satisfy the task resource request;
@@ -928,6 +1040,22 @@ func (alloc *Action) prioritizeNodes(ssn *framework.Session, task *api.TaskInfo,
 	return bestNode, higestScore
 }
 
+// allocateResourcesForTask 将一个 Task 分配到指定节点的具体操作。
+//
+// 这是 allocate 的最终环节，对应两级梯度节点选择的两种结果：
+//
+//	节点 Idle ≥ Task 请求 → stmt.Allocate(task, node)
+//	  → task.Status = Allocated
+//	  → task.Pod.Spec.NodeName = hostname
+//	  → node.Idle 减少，node.Used 增加
+//
+//	节点 Idle 不够但 FutureIdle(=Idle+Releasing) 够 → stmt.Pipeline(task, node.Name)
+//	  → task.Status = Pipelined
+//	  → task.NodeName = hostname
+//	  → 等 node.Releasing 资源释放后自动转 Allocated
+//
+// 注意：Allocate/Pipeline 只是记录操作到 stmt.operations，并不立即生效。
+// 真正生效需要 stmt.Commit() 调用，而 Commit 只有在 JobReady 条件下才执行。
 func (alloc *Action) allocateResourcesForTask(stmt *framework.Statement, task *api.TaskInfo, node *api.NodeInfo, job *api.JobInfo) (err error) {
 	// Allocate idle resource to the task.
 	if task.InitResreq.LessEqual(node.Idle, api.Zero) {

@@ -2,7 +2,9 @@
 
 ## 源码分析规范
 
-当用户要求分析 Volcano 调度器的某个插件、Action 或调度机制时，按以下流程产出：
+当用户要求分析 Volcano 调度器中的任何内容（插件、Action、调度机制、核心概念等）时，**必须产出文档**（ANALYSIS.md 或 CONCEPTS-*.md），不得仅以对话形式作答。详见 `/volcano-code-analysis` skill。
+
+按以下流程产出：
 
 ### 分析流程
 

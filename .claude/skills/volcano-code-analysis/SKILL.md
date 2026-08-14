@@ -1,11 +1,17 @@
 ---
 name: volcano-code-analysis
-description: Analyze Volcano scheduler source code — read code, add Chinese comments, write ANALYSIS.md with Mermaid diagrams and examples, symlink to docs/reading-notes/. Use when asked to analyze any Volcano plugin, action, or scheduling mechanism.
+description: Analyze Volcano scheduler source code — read code, add Chinese comments, write ANALYSIS.md with Mermaid diagrams and examples, symlink to docs/reading-notes/. Use when asked to analyze any Volcano plugin, action, scheduling mechanism, or core concept.
 ---
 
 # Volcano 源码分析
 
-当用户要求分析 Volcano 项目中的某个插件、Action 或调度机制时，按此规范执行。
+当用户要求分析 Volcano 项目中的任何内容（插件、Action、调度机制、核心概念、数据结构关系等），按此规范执行。
+
+## 硬性要求：必须产出文档
+
+**每次调用本 skill 都必须产出至少一个 markdown 文档（ANALYSIS.md 或 CONCEPTS-*.md），并建立软链接到 `docs/reading-notes/`。不得仅以对话形式作答。**
+
+不满足此要求等同于 skill 未生效。
 
 ## 核心原则
 
@@ -24,6 +30,12 @@ description: Analyze Volcano scheduler source code — read code, add Chinese co
 ### 源码注释
 
 为目标 .go 文件添加完整中文注释，覆盖设计意图、算法逻辑、边界条件，确保编译通过。
+
+**注释规范**：
+- **只能增量添加，不得删除或修改任何已有注释**（包括英文注释、TODO、代码原作者注记）
+- 新增的中文注释放在已有代码/注释的**上方**或**右侧**，不与原有内容混在同一行
+- 注释内容要点：类型设计意图、函数入参/出参/核心逻辑、关键决策的理由、边界条件处理
+- 注释完后必须验证 `go build` 通过
 
 ### 分析文档
 
