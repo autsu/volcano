@@ -166,42 +166,70 @@ func PatchNodeAnnotations(node *v1.Node, annotations map[string]string) error {
 	return err
 }
 
+// ExtractResourceRequest 从 Pod 的每个容器里抽取 NVIDIA 设备的资源请求（卡数/显存/算力），
+// 返回 ContainerDeviceRequest 切片。它兼容两种显存表达方式：
+//   - Memreq：绝对显存，单位 MiB；
+//   - MemPercentagereq：相对整张卡显存的百分比（0–100）。
+//
+// 关键点：101 是哨兵值（对应常量 DefaultMemPercentage），表示“用户未用百分比方式提需求”，
+// 因为它落在合法百分比区间（0–100）之外，不会被误当成真实百分比；只有当 MemPercentagereq==101
+// 且 Memreq==0（两者都没写）时，才兜底设成 100，表示“要一整张卡”。
 func ExtractResourceRequest(pod *v1.Pod, resourceType, countName, memoryName, percentageName, coreName string) []ContainerDeviceRequest {
+	// 构造“卡数”资源的 ResourceName
 	resourceName := v1.ResourceName(countName)
+	// 构造“绝对显存”资源的 ResourceName
 	resourceMem := v1.ResourceName(memoryName)
+	// 收集所有容器解析出的设备请求
 	counts := []ContainerDeviceRequest{}
 
 	//Count Nvidia GPU
+	// 遍历 Pod 的每个容器，逐个解析其设备请求
 	for i := 0; i < len(pod.Spec.Containers); i++ {
+		// singledevice 标记“是否只声明了显存而没有单独声明卡数”
 		singledevice := false
+		// 优先从 Limits 取卡数资源
 		v, ok := pod.Spec.Containers[i].Resources.Limits[resourceName]
+		// 卡数资源不存在时，退而取绝对显存资源，并标记单设备（卡数默认按 1 处理）
 		if !ok {
 			v, ok = pod.Spec.Containers[i].Resources.Limits[resourceMem]
 			singledevice = true
 		}
+		// 取到了卡数或显存资源才继续解析本容器
 		if ok {
+			// 默认卡数为 1
 			n := int64(1)
+			// 非单设备模式时，把资源值解析为真实卡数
 			if !singledevice {
 				n, _ = v.AsInt64()
 			}
+			// 绝对显存请求，默认 0
 			memnum := int32(0)
+			// 先取 Limits 里的绝对显存
 			mem, ok := pod.Spec.Containers[i].Resources.Limits[resourceMem]
+			// Limits 没写则退到 Requests
 			if !ok {
 				mem, ok = pod.Spec.Containers[i].Resources.Requests[resourceMem]
 			}
+			// 取到了就转成 int32 存入 memnum
 			if ok {
 				memnums, ok := mem.AsInt64()
 				if ok {
 					memnum = int32(memnums)
 				}
 			}
+			// 显存百分比请求，默认 101（哨兵：表示用户没用百分比方式提需求）
 			mempnum := int32(101)
+			// 配置了百分比资源名时才解析百分比注解
 			if percentageName != "" {
+				// 构造“显存百分比”资源的 ResourceName
 				resourceMemPercentage := v1.ResourceName(percentageName)
+				// 先取 Limits 里的百分比
 				mem, ok = pod.Spec.Containers[i].Resources.Limits[resourceMemPercentage]
+				// Limits 没写则退到 Requests
 				if !ok {
 					mem, ok = pod.Spec.Containers[i].Resources.Requests[resourceMemPercentage]
 				}
+				// 取到了就用真实百分比（0–100）覆盖默认值
 				if ok {
 					mempnums, ok := mem.AsInt64()
 					if ok {
@@ -209,16 +237,23 @@ func ExtractResourceRequest(pod *v1.Pod, resourceType, countName, memoryName, pe
 					}
 				}
 			}
+			// 兜底：既没写百分比（仍为 101）也没写绝对显存（memnum==0）时，视为要整张卡（100%）
 			if mempnum == 101 && memnum == 0 {
 				mempnum = 100
 			}
+			// 算力（核心占比）请求，默认 0
 			corenum := int32(0)
+			// 配置了算力资源名时才解析
 			if coreName != "" {
+				// 构造“算力”资源的 ResourceName
 				resourceCores := v1.ResourceName(coreName)
+				// 先取 Limits 里的算力
 				core, ok := pod.Spec.Containers[i].Resources.Limits[resourceCores]
+				// Limits 没写则退到 Requests
 				if !ok {
 					core, ok = pod.Spec.Containers[i].Resources.Requests[resourceCores]
 				}
+				// 取到了就转成 int32 存入 corenum
 				if ok {
 					corenums, ok := core.AsInt64()
 					if ok {
@@ -226,15 +261,18 @@ func ExtractResourceRequest(pod *v1.Pod, resourceType, countName, memoryName, pe
 					}
 				}
 			}
+			// 汇总本容器的设备请求并追加到结果切片
 			counts = append(counts, ContainerDeviceRequest{
-				Nums:             int32(n),
-				Type:             resourceType,
-				Memreq:           memnum,
-				MemPercentagereq: int32(mempnum),
-				Coresreq:         corenum,
+				Nums:             int32(n),       // 卡数
+				Type:             resourceType,   // 设备类型（如 NVIDIA）
+				Memreq:           memnum,         // 绝对显存（MiB）
+				MemPercentagereq: int32(mempnum), // 显存百分比；101=未设置，100=整卡
+				Coresreq:         corenum,        // 算力占比
 			})
 		}
 	}
+	// 打印解析结果（调试用）
 	klog.V(3).Infoln("counts=", counts)
+	// 返回所有容器的设备请求
 	return counts
 }
